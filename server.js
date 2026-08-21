@@ -277,6 +277,17 @@ app.get("/api/surveys/:activityId", auth, (req, res) => {
 });
 
 // ============================================================
+// 微信公众号网页授权域名验证
+// ============================================================
+// 在公众号后台设置「网页授权域名」时，会要求下载 MP_verify_xxx.txt 并放到域名根目录。
+// 把该文件的内容填到环境变量 MP_VERIFY_CONTENT，即可通过 /MP_verify_xxx.txt 访问。
+app.get("/MP_verify_*.txt", (req, res) => {
+  const content = process.env.MP_VERIFY_CONTENT || "";
+  if (!content) return res.status(404).type("text/plain").send("MP_VERIFY_CONTENT not configured");
+  res.type("text/plain").send(content);
+});
+
+// ============================================================
 // 静态文件 & SPA 回退
 // ============================================================
 
