@@ -144,14 +144,17 @@ app.get("/api/auth/session", auth, (req, res) => {
 
   const users = readJSON("users", {});
 
-  // 管理员
+  // 管理员：即使之前被记录为待审核，也强制提升为 active admin
   if (openid === ADMIN_OPENID) {
-    if (!users[openid]) {
+    const existing = users[openid];
+    if (!existing || existing.role !== "admin" || existing.status !== "active") {
       users[openid] = {
-        name: "管理员",
+        ...existing,
+        name: existing?.name || "管理员",
         role: "admin",
         status: "active",
-        createdAt: new Date().toISOString(),
+        createdAt: existing?.createdAt || new Date().toISOString(),
+        updatedAt: new Date().toISOString(),
       };
       writeJSON("users", users);
     }
