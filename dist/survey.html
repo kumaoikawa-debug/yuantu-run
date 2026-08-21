@@ -1,0 +1,123 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover" />
+  <title>远拓运营中心 · 活动问卷</title>
+  <style>
+    :root{
+      --c-deep:#152a1d;--c-green:#273f33;--c-green-500:#3f6e4f;--c-success:#2f6e4a;--c-lime:#dbe7c8;
+      --c-ink:#1f2d24;--c-muted:#6f7d73;--c-line:#e2e7e1;--c-bg:#f4f6f1;--c-surface:#ffffff;
+      --font-sans:-apple-system,BlinkMacSystemFont,"Segoe UI","PingFang SC","Hiragino Sans GB","Microsoft YaHei","Noto Sans SC",sans-serif;
+      --font-serif:Georgia,"Songti SC","Noto Serif SC",serif;
+    }
+    *{box-sizing:border-box;margin:0;padding:0}
+    body{font-family:var(--font-sans);background:var(--c-bg);color:var(--c-ink);-webkit-font-smoothing:antialiased;-moz-osx-font-smoothing:grayscale;text-rendering:optimizeLegibility}
+    .wrap{max-width:560px;margin:0 auto;min-height:100svh;background:#fff;display:flex;flex-direction:column}
+    .head{background:var(--c-green);color:#eaf0e9;padding:28px 22px 24px}
+    .head .brand{display:flex;align-items:center;gap:10px;font-size:11px;letter-spacing:.18em;opacity:.7}
+    .head .brand b{width:26px;height:26px;border-radius:50%;background:var(--c-lime);color:var(--c-deep);display:grid;place-items:center;font-style:italic;font-family:var(--font-serif);font-size:15px}
+    .head h1{font:400 24px/1.4 var(--font-serif);margin:16px 0 6px}
+    .head p{font-size:12px;opacity:.7}
+    .body{padding:22px;flex:1}
+    .q{background:var(--c-surface);border:1px solid var(--c-line);border-radius:12px;padding:16px;margin-bottom:14px}
+    .q .idx{display:inline-block;width:22px;height:22px;border-radius:50%;background:var(--c-lime);color:var(--c-deep);font-size:12px;font-weight:600;text-align:center;line-height:22px;margin-right:8px}
+    .q .qt{font-size:15px;font-weight:600;color:var(--c-ink);display:inline}
+    .q .req{color:#b3261e;font-size:12px;margin-left:6px}
+    .stars{display:flex;gap:8px;margin-top:14px}
+    .stars button{width:40px;height:40px;border-radius:50%;border:1px solid var(--c-line);background:#fff;font-size:20px;color:var(--c-muted);cursor:pointer;transition:.15s}
+    .stars button.on{background:var(--c-success);border-color:var(--c-success);color:#fff}
+    .q textarea{width:100%;min-height:72px;margin-top:12px;border:1px solid var(--c-line);border-radius:8px;padding:10px 12px;font-size:14px;font-family:inherit;resize:vertical}
+    .q textarea:focus{outline:none;border-color:var(--c-green-500);box-shadow:0 0 0 3px rgba(63,110,79,.14)}
+    .submit{position:sticky;bottom:0;background:var(--c-surface);border-top:1px solid var(--c-line);padding:16px 22px}
+    .submit button{width:100%;border:0;background:var(--c-green);color:#fff;border-radius:10px;padding:15px;font-size:15px;font-weight:600;cursor:pointer}
+    .submit button:disabled{opacity:.5}
+    .thanks{text-align:center;padding:80px 22px}
+    .thanks .ok{width:64px;height:64px;border-radius:50%;background:var(--c-lime);color:var(--c-deep);display:grid;place-items:center;font-size:34px;margin:0 auto 20px}
+    .thanks h2{font:400 22px var(--font-serif);margin-bottom:10px}
+    .thanks p{font-size:13px;color:var(--c-muted)}
+    .empty{padding:60px 22px;text-align:center;color:var(--c-muted);font-size:14px;line-height:1.8}
+    .foot{text-align:center;font-size:11px;color:var(--c-muted);padding:14px}
+  </style>
+</head>
+<body>
+  <div class="wrap" id="app">加载中…</div>
+  <script src="survey-cloud.js"></script>
+  <script>
+    (function () {
+      var app = document.getElementById('app');
+      var params = new URLSearchParams(location.search);
+      var actId = params.get('a');
+      function read(key, fallback) { try { var v = localStorage.getItem(key); return v ? JSON.parse(v) : fallback; } catch (e) { return fallback; } }
+      function escapeHtml(s) { return String(s == null ? '' : s).replace(/[&<>"']/g, function (c) { return {'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]; }); }
+      var useCloud = !!(window.surveyCloud && window.surveyCloud.enabled());
+
+      function boot(activity, survey) {
+        if (!activity) { app.innerHTML = '<div class="empty">未找到对应的活动问卷。<br/>请确认链接是否正确，或联系活动组织者重新发送。</div>'; return; }
+        if (!survey || !survey.length) { app.innerHTML = '<div class="empty">该活动暂未配置问卷题目。<br/>请稍后再试或联系活动组织者。</div>'; return; }
+        var answers = {};
+        var html = '';
+        html += '<div class="head"><div class="brand"><b>Y</b> 远拓运营中心</div>'
+              + '<h1>' + escapeHtml(activity.name) + '</h1>'
+              + '<p>活动结束后满意度问卷 · 您的反馈将帮助我们做得更好</p></div>';
+        html += '<div class="body">';
+        survey.forEach(function (q, i) {
+          html += '<div class="q" data-qid="' + q.id + '">';
+          html += '<div><span class="idx">' + (i + 1) + '</span><span class="qt">' + escapeHtml(q.q) + '</span>';
+          if (q.required) html += '<span class="req">*必答</span>';
+          html += '</div>';
+          if (q.type === 'rating') {
+            html += '<div class="stars" data-qid="' + q.id + '">';
+            for (var s = 1; s <= 5; s++) html += '<button type="button" data-val="' + s + '">★</button>';
+            html += '</div>';
+          } else { html += '<textarea data-qid="' + q.id + '" placeholder="请填写您的看法…"></textarea>'; }
+          html += '</div>';
+        });
+        html += '</div>';
+        html += '<div class="submit"><button id="submitBtn">提交问卷</button></div>';
+        html += '<div class="foot">远拓运营中心 · 问卷数据仅用于本次活动复盘</div>';
+        app.innerHTML = html;
+
+        app.querySelectorAll('.stars button').forEach(function (btn) {
+          btn.addEventListener('click', function () {
+            var wrap = btn.parentNode; var val = Number(btn.getAttribute('data-val'));
+            wrap.querySelectorAll('button').forEach(function (b, idx) { b.classList.toggle('on', idx < val); });
+            answers[wrap.getAttribute('data-qid')] = val;
+          });
+        });
+        app.querySelectorAll('textarea[data-qid]').forEach(function (ta) {
+          ta.addEventListener('input', function () { answers[ta.getAttribute('data-qid')] = ta.value; });
+        });
+        document.getElementById('submitBtn').addEventListener('click', function () {
+          var missing = survey.filter(function (q) { return q.required && (answers[q.id] === undefined || answers[q.id] === '' || answers[q.id] === null); });
+          if (missing.length) { alert('还有必答题未填写：' + missing.map(function (q) { return q.q; }).join('、')); return; }
+          var record = { time: new Date().toISOString(), activityId: actId, answers: answers };
+          if (useCloud) {
+            window.surveyCloud.submit(actId, record).then(function () {
+              app.innerHTML = '<div class="thanks"><div class="ok">✓</div><h2>感谢您的反馈！</h2><p>问卷已提交，祝您生活愉快。</p></div>';
+            }).catch(function () { alert('提交失败，请稍后重试'); });
+          } else {
+            var key = 'yt-survey-' + actId; var list = read(key, []); list.push(record);
+            try { localStorage.setItem(key, JSON.stringify(list)); } catch (e) {}
+            app.innerHTML = '<div class="thanks"><div class="ok">✓</div><h2>感谢您的反馈！</h2><p>问卷已提交，祝您生活愉快。</p></div>';
+          }
+        });
+      }
+
+      if (useCloud) {
+        window.surveyCloud.load(actId).then(function (data) { boot(data.activity, data.survey); }).catch(function () {
+          var activities = read('yt-activities', []); var storeMap = read('yt-store', {});
+          var activity = activities.find(function (a) { return a.id === actId; }) || null;
+          var survey = activity && storeMap[activity.id] ? storeMap[activity.id].survey : [];
+          boot(activity, survey);
+        });
+      } else {
+        var activities = read('yt-activities', []); var storeMap = read('yt-store', {});
+        var activity = activities.find(function (a) { return a.id === actId; }) || null;
+        var survey = activity && storeMap[activity.id] ? storeMap[activity.id].survey : [];
+        boot(activity, survey);
+      }
+    })();
+  </script>
+</body>
+</html>

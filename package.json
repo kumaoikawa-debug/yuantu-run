@@ -1,0 +1,13 @@
+{
+  "name": "yuantu-server",
+  "version": "1.0.0",
+  "private": true,
+  "description": "远拓运营中心后端服务器（阿里云部署）",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js"
+  },
+  "dependencies": {
+    "express": "^4.21.0"
+  }
+}
