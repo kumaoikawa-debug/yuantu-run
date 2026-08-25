@@ -144,6 +144,8 @@ app.get("/api/auth/session", auth, (req, res) => {
 
   const users = readJSON("users", {});
 
+  const now = new Date().toISOString();
+
   // 管理员：即使之前被记录为待审核，也强制提升为 active admin
   if (openid === ADMIN_OPENID) {
     const existing = users[openid];
@@ -153,12 +155,14 @@ app.get("/api/auth/session", auth, (req, res) => {
         name: existing?.name || "管理员",
         role: "admin",
         status: "active",
-        createdAt: existing?.createdAt || new Date().toISOString(),
-        updatedAt: new Date().toISOString(),
+        createdAt: existing?.createdAt || now,
+        updatedAt: now,
       };
       writeJSON("users", users);
     }
-    return res.json({ session: { openid, name: users[openid].name, role: "admin", status: "active" } });
+    users[openid].lastActiveAt = now;
+    writeJSON("users", users);
+    return res.json({ session: { openid, name: users[openid].name, role: "admin", status: "active", lastActiveAt: now } });
   }
 
   // 普通成员
@@ -167,23 +171,39 @@ app.get("/api/auth/session", auth, (req, res) => {
       name: req.userName || ("同事-" + openid.slice(-4)),
       role: "operator",
       status: "pending",
-      createdAt: new Date().toISOString(),
+      createdAt: now,
+      lastActiveAt: now,
     };
     writeJSON("users", users);
-    return res.json({ session: { openid, name: users[openid].name, role: "operator", status: "pending" } });
+    return res.json({ session: { openid, name: users[openid].name, role: "operator", status: "pending", lastActiveAt: now } });
   }
 
+  // 刷新活跃时间
+  users[openid].lastActiveAt = now;
+  writeJSON("users", users);
+
   const u = users[openid];
-  res.json({ session: { openid, name: u.name, role: u.role, status: u.status } });
+  res.json({ session: { openid, name: u.name, role: u.role, status: u.status, lastActiveAt: u.lastActiveAt || null } });
 });
 
 // ---- 用户列表（管理员） ----
 app.get("/api/auth/users", auth, requireAdmin, (req, res) => {
   const users = readJSON("users", {});
   const list = Object.entries(users).map(([openid, u]) => ({
-    openid, name: u.name, role: u.role, status: u.status, createdAt: u.createdAt,
+    openid, name: u.name, role: u.role, status: u.status, createdAt: u.createdAt, lastActiveAt: u.lastActiveAt || null,
   }));
   res.json({ users: list });
+});
+
+// ---- 心跳：记录当前用户活跃时间 ----
+app.post("/api/auth/heartbeat", auth, (req, res) => {
+  const openid = req.openid;
+  const users = readJSON("users", {});
+  if (users[openid]) {
+    users[openid].lastActiveAt = new Date().toISOString();
+    writeJSON("users", users);
+  }
+  res.json({ ok: true });
 });
 
 // ---- 修改用户（管理员） ----
