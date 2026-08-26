@@ -30,10 +30,12 @@ const ADMIN_OPENID = process.env.ADMIN_OPENID || "";
 
 // ---- CloudBase 初始化（仅在配置了 TCB_ENV 时加载 SDK） ----
 let tcb = null;
+let CLOUDBASE_SDK_VERSION = null;
 const TCB_ENV = process.env.TCB_ENV || process.env.ENV_ID || process.env.CLOUDBASE_ENV;
 if (TCB_ENV) {
   try {
     const cloudbase = require("@cloudbase/node-sdk");
+    try { CLOUDBASE_SDK_VERSION = require("@cloudbase/node-sdk/package.json").version; } catch {}
     const opts = { env: TCB_ENV };
     if (process.env.TCB_API_KEY) {
       // 新版控制台「服务端 API Key」单密钥模式（SDK 字段名为 accessKey）
@@ -44,7 +46,7 @@ if (TCB_ENV) {
       opts.secretKey = process.env.TCB_SECRET_KEY;
     }
     tcb = cloudbase.init(opts);
-    console.log(`  ☁️  CloudBase SDK 已加载，环境: ${TCB_ENV}`);
+    console.log(`  ☁️  CloudBase SDK 已加载 (v${CLOUDBASE_SDK_VERSION})，环境: ${TCB_ENV}`);
   } catch (e) {
     console.error("  ⚠️  CloudBase 初始化失败，将回退到本地磁盘:", e.message);
     tcb = null;
@@ -71,24 +73,30 @@ function ensureLocalDirs() {
 }
 
 // 超时包装：云调用若挂起（既不 resolve 也不 reject）会在 ms 后 reject，避免请求卡死
-function withTimeout(p, ms = 5000) {
-  return Promise.race([p, new Promise((_, rej) => setTimeout(() => rej(new Error("cloud timeout")), ms))]);
+function withTimeout(p, ms = 10000, label = "") {
+  return Promise.race([
+    p,
+    new Promise((_, rej) => setTimeout(() => rej(new Error("cloud timeout" + (label ? " (" + label + ")" : ""))), ms)),
+  ]);
 }
 
 // 运行时探测：确认云数据库真正可读。探测失败则自动降级本地磁盘，保证服务可用、登录不卡死。
 let lastCloudError = null;
+let lastCloudErrorAt = null;
 if (USE_CLOUD) {
   ensureLocalDirs(); // 先建好本地目录，降级时立刻可用
   (async () => {
     try {
-      await withTimeout(tcb.database().createCollection("kv"), 15000).catch(() => {});
-      await withTimeout(tcb.database().collection("kv").doc("__probe__").set({ _probe: true, _updated: Date.now() }), 15000);
-      await withTimeout(tcb.database().collection("kv").doc("__probe__").get(), 15000);
+      // 创建集合（已存在会报错，忽略；超时不阻塞后续 set/get）
+      await withTimeout(tcb.database().createCollection("kv"), 10000, "createCollection").catch(() => {});
+      await withTimeout(tcb.database().collection("kv").doc("__probe__").set({ _probe: true, _updated: Date.now() }), 10000, "set");
+      await withTimeout(tcb.database().collection("kv").doc("__probe__").get(), 10000, "get");
       cloudConfirmed = true;
       console.log("  ✅ CloudBase 持久化已确认可用");
     } catch (e) {
-      lastCloudError = e && e.message || String(e);
-      console.warn("  ⚠️  CloudBase 连接失败（" + lastCloudError + "），已自动降级为本地磁盘，请检查 TCB_ENV / 密钥配置");
+      lastCloudError = (e && e.message) || String(e);
+      lastCloudErrorAt = new Date().toISOString();
+      console.warn("  ⚠️  CloudBase 连接失败（" + lastCloudError + "），已自动降级为本地磁盘，请检查 TCB_ENV / TCB_API_KEY 配置");
       USE_CLOUD = false;
     }
   })();
@@ -207,7 +215,9 @@ app.get("/api/health", (req, res) => {
     tcbEnv: !!TCB_ENV,
     mode: (USE_CLOUD && cloudConfirmed) ? "cloud" : "local",
     cloudConfirmed,
+    sdkVersion: CLOUDBASE_SDK_VERSION,
     lastCloudError,
+    lastCloudErrorAt,
   });
 });
 
