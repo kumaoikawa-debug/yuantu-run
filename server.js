@@ -209,10 +209,16 @@ async function requireAdmin(req, res, next) {
 // ============================================================
 
 // 健康检查（无需登录）：暴露当前存储模式，便于外部验证云持久化是否生效
+function maskVal(v) {
+  if (!v) return null;
+  if (v.length <= 8) return v;
+  return v.slice(0, 4) + "…" + v.slice(-4);
+}
 app.get("/api/health", (req, res) => {
   res.json({
     ok: true,
     tcbEnv: !!TCB_ENV,
+    tcbEnvValue: maskVal(TCB_ENV),
     mode: (USE_CLOUD && cloudConfirmed) ? "cloud" : "local",
     cloudConfirmed,
     sdkVersion: CLOUDBASE_SDK_VERSION,
