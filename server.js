@@ -40,15 +40,19 @@ if (TCB_ENV) {
       opts.secretKey = process.env.TCB_SECRET_KEY;
     }
     tcb = cloudbase.init(opts);
-    console.log(`  ☁️  CloudBase 持久化已启用，环境: ${TCB_ENV}`);
+    console.log(`  ☁️  CloudBase SDK 已加载，环境: ${TCB_ENV}`);
   } catch (e) {
     console.error("  ⚠️  CloudBase 初始化失败，将回退到本地磁盘:", e.message);
     tcb = null;
   }
 }
-const USE_CLOUD = !!tcb;
 
-// ---- 目录（仅本地磁盘模式需要） ----
+// USE_CLOUD: SDK 是否加载成功；cloudConfirmed: 运行时探测云是否真正可用
+// （避免云连不上却硬走云模式导致登录/请求永久卡死）
+let USE_CLOUD = !!tcb;
+let cloudConfirmed = false;
+
+// 本地目录（云模式探测失败时也会用到）
 // 自动检测 dist 目录：优先同级 dist/（部署包），其次 ../standalone/dist（开发环境）
 const DIST_DIR = process.env.DIST_DIR ||
   (fs.existsSync(path.join(__dirname, "dist")) ? path.join(__dirname, "dist") : path.join(__dirname, "..", "standalone", "dist"));
@@ -56,13 +60,34 @@ const DATA_DIR = process.env.DATA_DIR ? path.resolve(process.env.DATA_DIR) : pat
 const UPLOADS_DIR = path.join(DATA_DIR, "uploads");
 const SURVEYS_DIR = path.join(DATA_DIR, "surveys");
 
-if (!USE_CLOUD) {
+function ensureLocalDirs() {
   fs.mkdirSync(DATA_DIR, { recursive: true });
   fs.mkdirSync(UPLOADS_DIR, { recursive: true });
   fs.mkdirSync(SURVEYS_DIR, { recursive: true });
+}
+
+// 超时包装：云调用若挂起（既不 resolve 也不 reject）会在 ms 后 reject，避免请求卡死
+function withTimeout(p, ms = 5000) {
+  return Promise.race([p, new Promise((_, rej) => setTimeout(() => rej(new Error("cloud timeout")), ms))]);
+}
+
+// 运行时探测：确认云数据库真正可读。探测失败则自动降级本地磁盘，保证服务可用、登录不卡死。
+if (USE_CLOUD) {
+  ensureLocalDirs(); // 先建好本地目录，降级时立刻可用
+  (async () => {
+    try {
+      await withTimeout(tcb.database().createCollection("kv"), 5000).catch(() => {});
+      await withTimeout(tcb.database().collection("kv").doc("__probe__").set({ _probe: true, _updated: Date.now() }), 5000);
+      await withTimeout(tcb.database().collection("kv").doc("__probe__").get(), 5000);
+      cloudConfirmed = true;
+      console.log("  ✅ CloudBase 持久化已确认可用");
+    } catch (e) {
+      console.warn("  ⚠️  CloudBase 连接失败（" + (e && e.message || e) + "），已自动降级为本地磁盘，请检查 TCB_ENV / 密钥配置");
+      USE_CLOUD = false;
+    }
+  })();
 } else {
-  // 确保 kv 集合存在（已存在时静默忽略报错）
-  tcb.database().createCollection("kv").catch(() => {});
+  ensureLocalDirs();
 }
 
 // ---- 内存会话：token -> { openid, name } ----
@@ -70,7 +95,7 @@ const sessions = new Map();
 
 // ---- 存储层：JSON 数据（云数据库 kv 集合 / 本地 JSON 文件） ----
 async function readJSON(name, fallback) {
-  if (!USE_CLOUD) {
+  if (!(USE_CLOUD && cloudConfirmed)) {
     try {
       return JSON.parse(fs.readFileSync(path.join(DATA_DIR, name + ".json"), "utf8"));
     } catch {
@@ -78,7 +103,7 @@ async function readJSON(name, fallback) {
     }
   }
   try {
-    const r = await tcb.database().collection("kv").doc(name).get();
+    const r = await withTimeout(tcb.database().collection("kv").doc(name).get());
     if (r.data && r.data.length) return r.data[0].value;
   } catch (e) {
     console.error("readJSON", name, e.message);
@@ -87,7 +112,7 @@ async function readJSON(name, fallback) {
 }
 
 async function writeJSON(name, data) {
-  if (!USE_CLOUD) {
+  if (!(USE_CLOUD && cloudConfirmed)) {
     const file = path.join(DATA_DIR, name + ".json");
     const tmp = file + ".tmp";
     fs.writeFileSync(tmp, JSON.stringify(data, null, 2));
@@ -95,7 +120,7 @@ async function writeJSON(name, data) {
     return;
   }
   try {
-    await tcb.database().collection("kv").doc(name).set({ value: data, _updated: Date.now() });
+    await withTimeout(tcb.database().collection("kv").doc(name).set({ value: data, _updated: Date.now() }));
   } catch (e) {
     console.error("writeJSON", name, e.message);
   }
@@ -118,7 +143,7 @@ async function serveCloudFile(rel, res) {
   const fileID = files[rel];
   if (!fileID) return res.status(404).send("not found");
   try {
-    const { fileContent } = await tcb.storage().downloadFile({ fileID });
+    const { fileContent } = await withTimeout(tcb.storage().downloadFile({ fileID }));
     res.type(path.extname(rel) || ".bin");
     res.send(fileContent);
   } catch (e) {
@@ -138,11 +163,13 @@ app.use((req, res, next) => {
   next();
 });
 
-// 上传的图片服务
-if (USE_CLOUD) {
-  app.get("/uploads/*", (req, res) => serveCloudFile(req.params[0], res));
-} else {
-  app.use("/uploads", express.static(UPLOADS_DIR));
+// 上传的图片服务：本地静态始终可用；云模式且已确认可用时优先走云存储
+app.use("/uploads", express.static(UPLOADS_DIR));
+if (TCB_ENV) {
+  app.get("/uploads/*", (req, res, next) => {
+    if (!(USE_CLOUD && cloudConfirmed)) return next(); // 云未确认可用，回退本地静态
+    serveCloudFile(req.params[0], res);
+  });
 }
 
 // ---- 鉴权中间件 ----
@@ -329,18 +356,18 @@ app.post("/api/upload", auth, async (req, res) => {
   const filename = `${activityId || "misc"}/${kind || "img"}/${Date.now()}-${Math.random().toString(36).slice(2, 8)}.${ext}`;
   const data = base64.replace(/^data:[^;]+;base64,/, "");
 
-  // 云存储模式
-  if (USE_CLOUD) {
+  // 云存储模式（仅在云已确认可用时；失败则降级本地盘）
+  if (USE_CLOUD && cloudConfirmed) {
     try {
       const cloudPath = "uploads/" + filename;
-      const ret = await tcb.storage().uploadFile({ cloudPath, fileContent: Buffer.from(data, "base64") });
+      const ret = await withTimeout(tcb.storage().uploadFile({ cloudPath, fileContent: Buffer.from(data, "base64") }));
       const fileID = ret.fileID || ret;
       const files = await readJSON("files", {});
       files[filename] = fileID;
       await writeJSON("files", files);
       return res.json({ url: "/uploads/" + filename, fileID });
     } catch (e) {
-      return res.status(500).json({ error: "upload failed: " + e.message });
+      console.error("cloud upload failed, fallback local:", e.message);
     }
   }
 
