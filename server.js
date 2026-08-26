@@ -431,6 +431,24 @@ async function requireAdmin(req, res, next) {
   res.status(403).json({ error: "forbidden" });
 }
 
+// 角色归一化：admin=管理员；general=一般用户（除管理员权限外的所有权限）；
+// operator 为旧版别名，兼容映射为 general；其余（含 viewer/未设置）一律视为只读。
+function normalizeRole(r) {
+  if (r === "admin") return "admin";
+  if (r === "general" || r === "operator") return "general";
+  return "viewer";
+}
+
+// 编辑权限：管理员 + 一般用户可写；普通用户（viewer）/ 待审核（pending）拒绝
+async function requireEdit(req, res, next) {
+  if (req.openid === ADMIN_OPENID) return next();
+  const users = await readJSON("users", {});
+  const u = users[req.openid];
+  const role = u ? normalizeRole(u.role) : "viewer";
+  if (u && u.status === "active" && (role === "admin" || role === "general")) return next();
+  res.status(403).json({ error: "no edit permission (read-only or pending)" });
+}
+
 // ============================================================
 // API 路由
 // ============================================================
@@ -547,13 +565,13 @@ app.get("/api/auth/session", auth, async (req, res) => {
   if (!users[openid]) {
     users[openid] = {
       name: req.userName || ("同事-" + openid.slice(-4)),
-      role: "operator",
+      role: "general",
       status: "pending",
       createdAt: now,
       lastActiveAt: now,
     };
     await writeJSON("users", users);
-    return res.json({ session: { openid, name: users[openid].name, role: "operator", status: "pending", lastActiveAt: now } });
+    return res.json({ session: { openid, name: users[openid].name, role: "general", status: "pending", lastActiveAt: now } });
   }
 
   // 刷新活跃时间
@@ -561,14 +579,14 @@ app.get("/api/auth/session", auth, async (req, res) => {
   await writeJSON("users", users);
 
   const u = users[openid];
-  res.json({ session: { openid, name: u.name, role: u.role, status: u.status, lastActiveAt: u.lastActiveAt || null } });
+  res.json({ session: { openid, name: u.name, role: normalizeRole(u.role), status: u.status, lastActiveAt: u.lastActiveAt || null } });
 });
 
 // ---- 用户列表（管理员） ----
 app.get("/api/auth/users", auth, requireAdmin, async (req, res) => {
   const users = await readJSON("users", {});
   const list = Object.entries(users).map(([openid, u]) => ({
-    openid, name: u.name, role: u.role, status: u.status, createdAt: u.createdAt, lastActiveAt: u.lastActiveAt || null,
+    openid, name: u.name, role: normalizeRole(u.role), status: u.status, createdAt: u.createdAt, lastActiveAt: u.lastActiveAt || null,
   }));
   res.json({ users: list });
 });
@@ -590,6 +608,15 @@ app.patch("/api/auth/users/:openid", auth, requireAdmin, async (req, res) => {
   const { name, role, status } = req.body;
   const users = await readJSON("users", {});
   if (!users[openid]) return res.status(404).json({ error: "user not found" });
+
+  // 角色合法性校验：仅允许 admin / general / viewer
+  if (role !== undefined && !["admin", "general", "viewer"].includes(role)) {
+    return res.status(400).json({ error: "invalid role, must be admin/general/viewer" });
+  }
+  // 状态合法性校验
+  if (status !== undefined && !["active", "pending", "disabled"].includes(status)) {
+    return res.status(400).json({ error: "invalid status" });
+  }
 
   if (name !== undefined) users[openid].name = name;
   if (role !== undefined) users[openid].role = role;
@@ -614,7 +641,7 @@ app.get("/api/activities", auth, async (req, res) => {
   res.json(await readJSON("activities", []));
 });
 
-app.post("/api/activities", auth, async (req, res) => {
+app.post("/api/activities", auth, requireEdit, async (req, res) => {
   await writeJSON("activities", req.body.list || []);
   res.json({ ok: true });
 });
@@ -624,7 +651,7 @@ app.get("/api/store", auth, async (req, res) => {
   res.json(await readJSON("stores", {}));
 });
 
-app.post("/api/store", auth, async (req, res) => {
+app.post("/api/store", auth, requireEdit, async (req, res) => {
   await writeJSON("stores", req.body.map || {});
   res.json({ ok: true });
 });
@@ -635,7 +662,7 @@ app.get("/api/uploads/:activityId", auth, async (req, res) => {
   res.json(uploads[req.params.activityId] || null);
 });
 
-app.post("/api/uploads/:activityId", auth, async (req, res) => {
+app.post("/api/uploads/:activityId", auth, requireEdit, async (req, res) => {
   const uploads = await readJSON("uploads", {});
   uploads[req.params.activityId] = req.body.uploads;
   await writeJSON("uploads", uploads);
@@ -643,7 +670,7 @@ app.post("/api/uploads/:activityId", auth, async (req, res) => {
 });
 
 // ---- 图片上传（base64 → PostgreSQL / 经典云存储 / 本地文件） ----
-app.post("/api/upload", auth, async (req, res) => {
+app.post("/api/upload", auth, requireEdit, async (req, res) => {
   const { base64, name, activityId, kind } = req.body;
   if (!base64) return res.status(400).json({ error: "missing base64" });
 
