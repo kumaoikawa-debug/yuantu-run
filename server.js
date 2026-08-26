@@ -198,6 +198,17 @@ async function requireAdmin(req, res, next) {
 // API 路由
 // ============================================================
 
+// 健康检查（无需登录）：暴露当前存储模式，便于外部验证云持久化是否生效
+app.get("/api/health", (req, res) => {
+  res.json({
+    ok: true,
+    tcbEnv: !!TCB_ENV,
+    mode: (USE_CLOUD && cloudConfirmed) ? "cloud" : "local",
+    cloudConfirmed,
+  });
+});
+
+
 // ---- 微信登录：code 换 openid + token ----
 app.post("/api/auth/login", async (req, res) => {
   const { code } = req.body;
