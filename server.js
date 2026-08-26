@@ -3,9 +3,10 @@
 // 一台机器搞定：API + 数据存储 + 图片存储 + 静态网页
 // 部署：node server.js  (配置 .env 文件设置 APPID / APPSECRET / ADMIN_OPENID)
 //
-// 数据持久化（二选一，按是否配置 TCB_ENV 自动切换）：
-//   1. 配置 TCB_ENV（CloudBase 环境ID）  →  JSON 数据存云数据库(kv集合)，图片存云存储
-//   2. 未配置 TCB_ENV                    →  JSON/图片都存本地磁盘（开发/沙箱/临时用）
+// 数据持久化（按环境自动切换，优先顺序）：
+//   1. 配置 TCB_ENV + SecretId/SecretKey  →  优先 CloudBase 文档型数据库 (kv集合)
+//   2. 文档型数据库不可用 (PG 模式/个人版) →  降级 CloudBase PostgreSQL (manager-node 执行 SQL)
+//   3. 未配置 TCB_ENV 或 探测全部失败     →  JSON/图片都存本地磁盘
 // ============================================================
 
 const express = require("express");
@@ -37,10 +38,14 @@ const APPID = process.env.APPID || "";
 const APPSECRET = process.env.APPSECRET || "";
 const ADMIN_OPENID = process.env.ADMIN_OPENID || "";
 
+// ---- 环境变量与凭证 ----
+const TCB_ENV = process.env.TCB_ENV || process.env.ENV_ID || process.env.CLOUDBASE_ENV;
+const HAS_TCB_API_KEY = !!process.env.TCB_API_KEY;
+const HAS_TCB_SECRET = !!(process.env.TCB_SECRET_ID && process.env.TCB_SECRET_KEY);
+
 // ---- CloudBase 初始化（仅在配置了 TCB_ENV 时加载 SDK） ----
 let tcb = null;
 let CLOUDBASE_SDK_VERSION = null;
-const TCB_ENV = process.env.TCB_ENV || process.env.ENV_ID || process.env.CLOUDBASE_ENV;
 if (TCB_ENV) {
   try {
     const cloudbase = require("@cloudbase/node-sdk");
@@ -62,20 +67,37 @@ if (TCB_ENV) {
   }
 }
 
-// USE_CLOUD: SDK 是否加载成功；cloudConfirmed: 运行时探测云是否真正可用
-// （避免云连不上却硬走云模式导致登录/请求永久卡死）
-let USE_CLOUD = !!tcb;
-let cloudConfirmed = false;
+// ---- CloudBase 管理端 SDK（用于 PG 模式执行 SQL；仅当有云环境+Secret 时初始化） ----
+let manager = null;
+let MANAGER_SDK_VERSION = null;
+if (TCB_ENV && HAS_TCB_SECRET) {
+  try {
+    const CloudBase = require("@cloudbase/manager-node");
+    try { MANAGER_SDK_VERSION = require("@cloudbase/manager-node/package.json").version; } catch {}
+    manager = CloudBase.init({
+      secretId: process.env.TCB_SECRET_ID,
+      secretKey: process.env.TCB_SECRET_KEY,
+      envId: TCB_ENV,
+    });
+    console.log(`  🗄️  CloudBase Manager SDK 已加载 (v${MANAGER_SDK_VERSION})`);
+  } catch (e) {
+    console.error("  ⚠️  CloudBase Manager 初始化失败:", e.message);
+    manager = null;
+  }
+}
 
-// 凭证是否齐全（用于判断是否真去探测云，避免无凭证时发起云调用而崩溃）
-const HAS_TCB_API_KEY = !!process.env.TCB_API_KEY;
-const HAS_TCB_SECRET = !!(process.env.TCB_SECRET_ID && process.env.TCB_SECRET_KEY);
-// 若配置了 TCB_ENV 却无任何可用凭证（也无云托管自动注入的临时凭证），
-// 直接降级本地磁盘，避免云调用因 missing secretId/secretKey 而崩溃进程。
+// USE_CLOUD: 是否尝试走云；cloudConfirmed: 运行时探测云是否真正可用
+// CLOUD_MODE: "tcb-db" | "tcb-pg" | null（null 表示本地磁盘）
+let USE_CLOUD = !!(tcb || manager);
+let cloudConfirmed = false;
+let CLOUD_MODE = null;
+
+// 若配置了 TCB_ENV 却无任何可用凭证，直接降级本地磁盘，避免云调用崩溃进程。
 if (USE_CLOUD && !HAS_TCB_API_KEY && !HAS_TCB_SECRET) {
   console.warn("  ⚠️  已设置 TCB_ENV 但未提供 TCB_API_KEY / TCB_SECRET_ID+TCB_SECRET_KEY，已回退本地磁盘。");
   USE_CLOUD = false;
   tcb = null;
+  manager = null;
 }
 
 // 本地目录（云模式探测失败时也会用到）
@@ -100,24 +122,90 @@ function withTimeout(p, ms = 10000, label = "") {
   ]);
 }
 
-// 运行时探测：确认云数据库真正可读。探测失败则自动降级本地磁盘，保证服务可用、登录不卡死。
+// ---- PostgreSQL 模式辅助函数 ----
+const PG_TABLE = process.env.TCB_PG_TABLE || "yuantu_kv";
+async function pgEnsureTable() {
+  if (!manager || !manager.database || !manager.database.executePGSql) throw new Error("manager not ready");
+  await withTimeout(
+    manager.database.executePGSql({
+      Sql: `CREATE TABLE IF NOT EXISTS ${PG_TABLE} (key TEXT PRIMARY KEY, value JSONB NOT NULL, updated_at TIMESTAMP DEFAULT NOW())`,
+    }),
+    15000,
+    "pg-create-table"
+  );
+}
+async function pgRead(key) {
+  const res = await withTimeout(
+    manager.database.executePGSql({ Sql: `SELECT value FROM ${PG_TABLE} WHERE key = '${key.replace(/'/g, "''")}'` }),
+    15000,
+    "pg-read"
+  );
+  if (!res || !res.Rows || !res.Rows.length) return undefined;
+  const row = JSON.parse(res.Rows[0]);
+  // Rows 是字符串数组， Columns 为 ['value']，所以 row[0] 是 value 的 JSON 字符串
+  const valStr = row[0];
+  return typeof valStr === "string" ? JSON.parse(valStr) : valStr;
+}
+async function pgWrite(key, value) {
+  const val = JSON.stringify(value).replace(/\\/g, "\\\\").replace(/'/g, "''");
+  await withTimeout(
+    manager.database.executePGSql({
+      Sql: `INSERT INTO ${PG_TABLE} (key, value, updated_at) VALUES ('${key.replace(/'/g, "''")}', '${val}'::jsonb, NOW()) ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value, updated_at = NOW()`,
+    }),
+    15000,
+    "pg-write"
+  );
+}
+
+// 运行时探测：按顺序尝试文档型数据库 → PostgreSQL。失败则自动降级本地磁盘。
 let lastCloudError = null;
 let lastCloudErrorAt = null;
 if (USE_CLOUD) {
   ensureLocalDirs(); // 先建好本地目录，降级时立刻可用
   (async () => {
-    try {
-      // 创建集合（已存在会报错，忽略；超时不阻塞后续 set/get）
-      await withTimeout(tcb.database().createCollection("kv"), 10000, "createCollection").catch(() => {});
-      await withTimeout(tcb.database().collection("kv").doc("__probe__").set({ _probe: true, _updated: Date.now() }), 10000, "set");
-      await withTimeout(tcb.database().collection("kv").doc("__probe__").get(), 10000, "get");
-      cloudConfirmed = true;
-      console.log("  ✅ CloudBase 持久化已确认可用");
-    } catch (e) {
-      lastCloudError = (e && e.message) || String(e);
-      lastCloudErrorAt = new Date().toISOString();
-      console.warn("  ⚠️  CloudBase 连接失败（" + lastCloudError + "），已自动降级为本地磁盘，请检查 TCB_ENV / 密钥配置");
-      USE_CLOUD = false;
+    // 1) 先探测文档型数据库
+    if (tcb) {
+      try {
+        await withTimeout(tcb.database().createCollection("kv"), 10000, "createCollection").catch(() => {});
+        await withTimeout(tcb.database().collection("kv").doc("__probe__").set({ _probe: true, _updated: Date.now() }), 10000, "set");
+        await withTimeout(tcb.database().collection("kv").doc("__probe__").get(), 10000, "get");
+        cloudConfirmed = true;
+        CLOUD_MODE = "tcb-db";
+        console.log("  ✅ CloudBase 文档型数据库持久化已确认可用");
+        return;
+      } catch (e) {
+        const msg = ((e && e.message) || String(e)).toLowerCase();
+        lastCloudError = (e && e.message) || String(e);
+        lastCloudErrorAt = new Date().toISOString();
+        console.warn("  ⚠️  CloudBase 文档型数据库探测失败（" + lastCloudError + "），尝试 PostgreSQL 模式...");
+        // 如果不是"资源不存在"类错误，且没有 manager，则直接降级
+        const isMissingResource = msg.includes("not found") || msg.includes("resource") || msg.includes("数据库") || msg.includes("database");
+        if (!isMissingResource || !manager) {
+          USE_CLOUD = false;
+          return;
+        }
+      }
+    }
+
+    // 2) 文档型数据库不可用，尝试 PostgreSQL（PG 模式 / 个人版常见）
+    if (manager) {
+      try {
+        await pgEnsureTable();
+        await pgWrite("__probe__", { _probe: true, _updated: Date.now() });
+        const probe = await pgRead("__probe__");
+        if (probe && probe._probe) {
+          cloudConfirmed = true;
+          CLOUD_MODE = "tcb-pg";
+          console.log("  ✅ CloudBase PostgreSQL 持久化已确认可用");
+          return;
+        }
+        throw new Error("pg probe read mismatch");
+      } catch (e) {
+        lastCloudError = (e && e.message) || String(e);
+        lastCloudErrorAt = new Date().toISOString();
+        console.warn("  ⚠️  CloudBase PostgreSQL 探测失败（" + lastCloudError + "），已自动降级为本地磁盘");
+        USE_CLOUD = false;
+      }
     }
   })().catch((e) => {
     lastCloudError = (e && e.message) || String(e);
@@ -132,37 +220,48 @@ if (USE_CLOUD) {
 // ---- 内存会话：token -> { openid, name } ----
 const sessions = new Map();
 
-// ---- 存储层：JSON 数据（云数据库 kv 集合 / 本地 JSON 文件） ----
+// ---- 存储层：JSON 数据（云数据库 kv 集合 / PostgreSQL / 本地 JSON 文件） ----
 async function readJSON(name, fallback) {
-  if (!(USE_CLOUD && cloudConfirmed)) {
+  if (USE_CLOUD && cloudConfirmed) {
     try {
-      return JSON.parse(fs.readFileSync(path.join(DATA_DIR, name + ".json"), "utf8"));
-    } catch {
-      return fallback;
+      if (CLOUD_MODE === "tcb-db") {
+        const r = await withTimeout(tcb.database().collection("kv").doc(name).get(), 15000, "db-read");
+        if (r.data && r.data.length) return r.data[0].value;
+      } else if (CLOUD_MODE === "tcb-pg") {
+        const v = await pgRead(name);
+        if (v !== undefined) return v;
+      }
+    } catch (e) {
+      console.error("readJSON cloud", name, CLOUD_MODE, e.message);
     }
+    return fallback;
   }
   try {
-    const r = await withTimeout(tcb.database().collection("kv").doc(name).get());
-    if (r.data && r.data.length) return r.data[0].value;
-  } catch (e) {
-    console.error("readJSON", name, e.message);
+    return JSON.parse(fs.readFileSync(path.join(DATA_DIR, name + ".json"), "utf8"));
+  } catch {
+    return fallback;
   }
-  return fallback;
 }
 
 async function writeJSON(name, data) {
-  if (!(USE_CLOUD && cloudConfirmed)) {
-    const file = path.join(DATA_DIR, name + ".json");
-    const tmp = file + ".tmp";
-    fs.writeFileSync(tmp, JSON.stringify(data, null, 2));
-    fs.renameSync(tmp, file);
+  if (USE_CLOUD && cloudConfirmed) {
+    try {
+      if (CLOUD_MODE === "tcb-db") {
+        await withTimeout(tcb.database().collection("kv").doc(name).set({ value: data, _updated: Date.now() }), 15000, "db-write");
+        return;
+      } else if (CLOUD_MODE === "tcb-pg") {
+        await pgWrite(name, data);
+        return;
+      }
+    } catch (e) {
+      console.error("writeJSON cloud", name, CLOUD_MODE, e.message);
+    }
     return;
   }
-  try {
-    await withTimeout(tcb.database().collection("kv").doc(name).set({ value: data, _updated: Date.now() }));
-  } catch (e) {
-    console.error("writeJSON", name, e.message);
-  }
+  const file = path.join(DATA_DIR, name + ".json");
+  const tmp = file + ".tmp";
+  fs.writeFileSync(tmp, JSON.stringify(data, null, 2));
+  fs.renameSync(tmp, file);
 }
 
 // ---- 问卷存储（每个活动一条 kv 记录） ----
@@ -245,8 +344,10 @@ app.get("/api/health", (req, res) => {
     tcbEnv: !!TCB_ENV,
     tcbEnvValue: maskVal(TCB_ENV),
     mode: (USE_CLOUD && cloudConfirmed) ? "cloud" : "local",
+    cloudMode: CLOUD_MODE,
     cloudConfirmed,
     sdkVersion: CLOUDBASE_SDK_VERSION,
+    managerVersion: MANAGER_SDK_VERSION,
     hasApiKey: HAS_TCB_API_KEY,
     hasSecret: HAS_TCB_SECRET,
     lastCloudError,
