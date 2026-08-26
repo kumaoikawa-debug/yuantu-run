@@ -28,7 +28,7 @@ const ADMIN_OPENID = process.env.ADMIN_OPENID || "";
 // 自动检测 dist 目录：优先同级 dist/（部署包），其次 ../standalone/dist（开发环境）
 const DIST_DIR = process.env.DIST_DIR ||
   (fs.existsSync(path.join(__dirname, "dist")) ? path.join(__dirname, "dist") : path.join(__dirname, "..", "standalone", "dist"));
-const DATA_DIR = path.join(__dirname, "data");
+const DATA_DIR = process.env.DATA_DIR ? path.resolve(process.env.DATA_DIR) : path.join(__dirname, "data");
 const UPLOADS_DIR = path.join(DATA_DIR, "uploads");
 const SURVEYS_DIR = path.join(DATA_DIR, "surveys");
 
