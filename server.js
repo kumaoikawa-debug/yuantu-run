@@ -36,8 +36,8 @@ if (TCB_ENV) {
     const cloudbase = require("@cloudbase/node-sdk");
     const opts = { env: TCB_ENV };
     if (process.env.TCB_API_KEY) {
-      // 新版控制台「服务端 API Key」单密钥模式
-      opts.apiKey = process.env.TCB_API_KEY;
+      // 新版控制台「服务端 API Key」单密钥模式（SDK 字段名为 accessKey）
+      opts.accessKey = process.env.TCB_API_KEY;
     } else if (process.env.TCB_SECRET_ID && process.env.TCB_SECRET_KEY) {
       // 旧版 SecretId/SecretKey 模式
       opts.secretId = process.env.TCB_SECRET_ID;
@@ -76,6 +76,7 @@ function withTimeout(p, ms = 5000) {
 }
 
 // 运行时探测：确认云数据库真正可读。探测失败则自动降级本地磁盘，保证服务可用、登录不卡死。
+let lastCloudError = null;
 if (USE_CLOUD) {
   ensureLocalDirs(); // 先建好本地目录，降级时立刻可用
   (async () => {
@@ -86,7 +87,8 @@ if (USE_CLOUD) {
       cloudConfirmed = true;
       console.log("  ✅ CloudBase 持久化已确认可用");
     } catch (e) {
-      console.warn("  ⚠️  CloudBase 连接失败（" + (e && e.message || e) + "），已自动降级为本地磁盘，请检查 TCB_ENV / 密钥配置");
+      lastCloudError = e && e.message || String(e);
+      console.warn("  ⚠️  CloudBase 连接失败（" + lastCloudError + "），已自动降级为本地磁盘，请检查 TCB_ENV / 密钥配置");
       USE_CLOUD = false;
     }
   })();
@@ -205,6 +207,7 @@ app.get("/api/health", (req, res) => {
     tcbEnv: !!TCB_ENV,
     mode: (USE_CLOUD && cloudConfirmed) ? "cloud" : "local",
     cloudConfirmed,
+    lastCloudError,
   });
 });
 
