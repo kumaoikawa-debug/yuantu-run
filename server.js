@@ -81,9 +81,9 @@ if (USE_CLOUD) {
   ensureLocalDirs(); // 先建好本地目录，降级时立刻可用
   (async () => {
     try {
-      await withTimeout(tcb.database().createCollection("kv"), 5000).catch(() => {});
-      await withTimeout(tcb.database().collection("kv").doc("__probe__").set({ _probe: true, _updated: Date.now() }), 5000);
-      await withTimeout(tcb.database().collection("kv").doc("__probe__").get(), 5000);
+      await withTimeout(tcb.database().createCollection("kv"), 15000).catch(() => {});
+      await withTimeout(tcb.database().collection("kv").doc("__probe__").set({ _probe: true, _updated: Date.now() }), 15000);
+      await withTimeout(tcb.database().collection("kv").doc("__probe__").get(), 15000);
       cloudConfirmed = true;
       console.log("  ✅ CloudBase 持久化已确认可用");
     } catch (e) {
