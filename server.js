@@ -521,11 +521,51 @@ app.post("/api/auth/login", async (req, res) => {
     const data = await resp.json();
     if (data.errcode) return res.status(400).json({ error: data.errmsg || "wechat error" });
 
-    const { openid } = data;
+    const { openid, access_token, scope } = data;
+    let nickname = null;
+    let avatar = null;
+
+    // snsapi_userinfo 授权时，拉取微信昵称与头像
+    if (access_token && openid && scope === "snsapi_userinfo") {
+      try {
+        const uiResp = await fetch(
+          `https://api.weixin.qq.com/sns/userinfo?access_token=${access_token}&openid=${openid}&lang=zh_CN`
+        );
+        const ui = await uiResp.json();
+        if (!ui.errcode && ui.nickname) {
+          nickname = ui.nickname;
+          avatar = ui.headimgurl || null;
+        }
+      } catch (e) {
+        // userinfo 接口失败不影响登录，降级使用默认名字
+      }
+    }
+
+    const fallbackName = "同事-" + openid.slice(-4);
+    const name = nickname || fallbackName;
+
+    // 同步到用户表：保留已有角色/状态，仅更新昵称/头像/活跃时间
+    const users = await readJSON("users", {});
+    const now = new Date().toISOString();
+    const existing = users[openid] || {};
+    users[openid] = {
+      ...existing,
+      name,
+      avatar: avatar || existing.avatar || null,
+      lastActiveAt: now,
+      ...(existing.createdAt ? {} : { role: "general", status: "pending", createdAt: now }),
+    };
+    if (openid === ADMIN_OPENID) {
+      users[openid].role = "admin";
+      users[openid].status = "active";
+    }
+    await writeJSON("users", users);
+
     const token = crypto.randomBytes(32).toString("hex");
-    const name = "同事-" + openid.slice(-4);
     sessions.set(token, { openid, name });
-    res.json({ openid, token, name });
+    const userRole = openid === ADMIN_OPENID ? "admin" : (users[openid].role || "general");
+    const userStatus = openid === ADMIN_OPENID ? "active" : (users[openid].status || "pending");
+    res.json({ openid, token, name, avatar, role: userRole, status: userStatus });
   } catch (err) {
     res.status(500).json({ error: String((err && err.message) || err) });
   }
@@ -558,7 +598,7 @@ app.get("/api/auth/session", auth, async (req, res) => {
     }
     users[openid].lastActiveAt = now;
     await writeJSON("users", users);
-    return res.json({ session: { openid, name: users[openid].name, role: "admin", status: "active", lastActiveAt: now } });
+    return res.json({ session: { openid, name: users[openid].name, avatar: users[openid].avatar || null, role: "admin", status: "active", lastActiveAt: now } });
   }
 
   // 普通成员
@@ -571,7 +611,7 @@ app.get("/api/auth/session", auth, async (req, res) => {
       lastActiveAt: now,
     };
     await writeJSON("users", users);
-    return res.json({ session: { openid, name: users[openid].name, role: "general", status: "pending", lastActiveAt: now } });
+    return res.json({ session: { openid, name: users[openid].name, avatar: users[openid].avatar || null, role: "general", status: "pending", lastActiveAt: now } });
   }
 
   // 刷新活跃时间
@@ -579,14 +619,14 @@ app.get("/api/auth/session", auth, async (req, res) => {
   await writeJSON("users", users);
 
   const u = users[openid];
-  res.json({ session: { openid, name: u.name, role: normalizeRole(u.role), status: u.status, lastActiveAt: u.lastActiveAt || null } });
+  res.json({ session: { openid, name: u.name, avatar: u.avatar || null, role: normalizeRole(u.role), status: u.status, lastActiveAt: u.lastActiveAt || null } });
 });
 
 // ---- 用户列表（管理员） ----
 app.get("/api/auth/users", auth, requireAdmin, async (req, res) => {
   const users = await readJSON("users", {});
   const list = Object.entries(users).map(([openid, u]) => ({
-    openid, name: u.name, role: normalizeRole(u.role), status: u.status, createdAt: u.createdAt, lastActiveAt: u.lastActiveAt || null,
+    openid, name: u.name, avatar: u.avatar || null, role: normalizeRole(u.role), status: u.status, createdAt: u.createdAt, lastActiveAt: u.lastActiveAt || null,
   }));
   res.json({ users: list });
 });
