@@ -157,6 +157,44 @@ async function pgWrite(key, value) {
   );
 }
 
+// ---- 图片存 PostgreSQL（PG 模式下云存储 tcb.storage 不可用，改用 PG 文本列存 base64） ----
+const PG_FILES_TABLE = process.env.TCB_PG_FILES_TABLE || "yuantu_files";
+async function pgEnsureFilesTable() {
+  if (!manager || !manager.database || !manager.database.executePGSql) throw new Error("manager not ready");
+  await withTimeout(
+    manager.database.executePGSql({
+      Sql: `CREATE TABLE IF NOT EXISTS ${PG_FILES_TABLE} (key TEXT PRIMARY KEY, content_text TEXT NOT NULL, content_type TEXT, updated_at TIMESTAMP DEFAULT NOW())`,
+    }),
+    15000,
+    "pg-create-files-table"
+  );
+}
+async function pgPutFile(key, buf, contentType) {
+  const b64 = buf.toString("base64").replace(/\n/g, "").replace(/'/g, "''");
+  const ct = (contentType || "application/octet-stream").replace(/'/g, "''");
+  const k = key.replace(/'/g, "''");
+  await withTimeout(
+    manager.database.executePGSql({
+      Sql: `INSERT INTO ${PG_FILES_TABLE} (key, content_text, content_type, updated_at) VALUES ('${k}', '${b64}', '${ct}', NOW()) ON CONFLICT (key) DO UPDATE SET content_text = EXCLUDED.content_text, content_type = EXCLUDED.content_type, updated_at = NOW()`,
+    }),
+    20000,
+    "pg-put-file"
+  );
+}
+async function pgGetFile(key) {
+  const res = await withTimeout(
+    manager.database.executePGSql({ Sql: `SELECT content_text, content_type FROM ${PG_FILES_TABLE} WHERE key = '${key.replace(/'/g, "''")}'` }),
+    15000,
+    "pg-get-file"
+  );
+  if (!res || !res.Rows || !res.Rows.length) return null;
+  const row = JSON.parse(res.Rows[0]);
+  const b64 = row[0];
+  const contentType = row[1] || null;
+  if (!b64) return null;
+  return { content: Buffer.from(b64, "base64"), content_type: contentType };
+}
+
 // 运行时探测：按顺序尝试文档型数据库 → PostgreSQL。失败则自动降级本地磁盘。
 let lastCloudError = null;
 let lastCloudErrorAt = null;
@@ -217,6 +255,7 @@ if (USE_CLOUD) {
     if (manager) {
       try {
         await pgEnsureTable();
+        await pgEnsureFilesTable();
         await pgWrite("__probe__", { _probe: true, _updated: Date.now() });
         const probe = await pgRead("__probe__");
         if (probe && probe._probe) {
@@ -328,14 +367,30 @@ app.use((req, res, next) => {
   next();
 });
 
-// 上传的图片服务：本地静态始终可用；云模式且已确认可用时优先走云存储
-app.use("/uploads", express.static(UPLOADS_DIR));
-if (TCB_ENV) {
-  app.get("/uploads/*", (req, res, next) => {
-    if (!(USE_CLOUD && cloudConfirmed && storageConfirmed)) return next(); // 云存储未确认可用，回退本地静态
-    serveCloudFile(req.params[0], res);
-  });
-}
+// 上传的图片服务：云存储（PG 模式 / 经典模式）优先，本地磁盘兜底
+app.get("/uploads/*", async (req, res) => {
+  const rel = req.params[0];
+  // 1) PG 模式：从 PostgreSQL 读图片（base64 解码）
+  if (USE_CLOUD && cloudConfirmed && CLOUD_MODE === "tcb-pg") {
+    try {
+      const f = await pgGetFile(rel);
+      if (f && f.content && f.content.length) {
+        res.type(f.content_type || path.extname(rel) || ".jpg");
+        return res.send(f.content);
+      }
+    } catch (e) { console.error("pg file read", rel, e.message); }
+  }
+  // 2) 经典模式云存储（fileID 映射）
+  if (USE_CLOUD && cloudConfirmed && storageConfirmed) {
+    return serveCloudFile(rel, res);
+  }
+  // 3) 本地磁盘兜底
+  const localPath = path.join(UPLOADS_DIR, rel);
+  if (fs.existsSync(localPath) && fs.statSync(localPath).isFile()) {
+    return res.sendFile(localPath);
+  }
+  res.status(404).send("not found");
+});
 
 // ---- 鉴权中间件 ----
 function auth(req, res, next) {
@@ -539,20 +594,29 @@ app.post("/api/uploads/:activityId", auth, async (req, res) => {
   res.json({ ok: true });
 });
 
-// ---- 图片上传（base64 → 云存储 / 本地文件） ----
+// ---- 图片上传（base64 → PostgreSQL / 经典云存储 / 本地文件） ----
 app.post("/api/upload", auth, async (req, res) => {
   const { base64, name, activityId, kind } = req.body;
   if (!base64) return res.status(400).json({ error: "missing base64" });
 
   const ext = ((name || "x.jpg").split(".").pop() || "jpg").toLowerCase().replace(/[^a-z0-9]/g, "") || "jpg";
   const filename = `${activityId || "misc"}/${kind || "img"}/${Date.now()}-${Math.random().toString(36).slice(2, 8)}.${ext}`;
-  const data = base64.replace(/^data:[^;]+;base64,/, "");
+  const buf = Buffer.from(base64.replace(/^data:[^;]+;base64,/, ""), "base64");
 
-  // 云存储模式（仅在云已确认且云存储探测可用时；否则降级本地盘）
+  // 1) PG 模式：图片直接存 PostgreSQL（云存储 tcb.storage 在 PG 模式下不可用）
+  if (USE_CLOUD && cloudConfirmed && CLOUD_MODE === "tcb-pg") {
+    try {
+      await pgPutFile(filename, buf, "image/" + ext);
+      return res.json({ url: "/uploads/" + filename, fileID: "" });
+    } catch (e) {
+      console.error("pg file write failed, fallback local:", e.message);
+    }
+  }
+  // 2) 经典模式云存储（fileID 映射）
   if (USE_CLOUD && cloudConfirmed && storageConfirmed) {
     try {
       const cloudPath = "uploads/" + filename;
-      const ret = await withTimeout(tcb.storage().uploadFile({ cloudPath, fileContent: Buffer.from(data, "base64") }));
+      const ret = await withTimeout(tcb.storage().uploadFile({ cloudPath, fileContent: buf }), 12000, "storage-upload");
       const fileID = ret.fileID || ret;
       const files = await readJSON("files", {});
       files[filename] = fileID;
@@ -562,11 +626,10 @@ app.post("/api/upload", auth, async (req, res) => {
       console.error("cloud upload failed, fallback local:", e.message);
     }
   }
-
-  // 本地磁盘模式
+  // 3) 本地磁盘兜底
   const filepath = path.join(UPLOADS_DIR, filename);
   fs.mkdirSync(path.dirname(filepath), { recursive: true });
-  fs.writeFileSync(filepath, Buffer.from(data, "base64"));
+  fs.writeFileSync(filepath, buf);
   res.json({ url: "/uploads/" + filename, fileID: "" });
 });
 
