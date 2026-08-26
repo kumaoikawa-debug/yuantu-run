@@ -13,6 +13,15 @@ const fs = require("fs");
 const path = require("path");
 const crypto = require("crypto");
 
+// 全局兜底：避免云 SDK 内部未处理的 Promise 拒绝 / 异常导致进程退出、容器反复重启。
+// 任何未被捕获的 rejection/异常只记录日志，服务继续运行（若已降级则走本地磁盘），不崩溃。
+process.on("unhandledRejection", (reason) => {
+  console.error("  ⚠️  [unhandledRejection] 已忽略，避免进程崩溃:", (reason && (reason.message || reason)) || reason);
+});
+process.on("uncaughtException", (err) => {
+  console.error("  ⚠️  [uncaughtException] 已忽略，避免进程崩溃:", (err && err.message) || err);
+});
+
 // ---- 加载 .env 文件（无需 dotenv 依赖，手动解析） ----
 const envFile = path.join(__dirname, ".env");
 if (fs.existsSync(envFile)) {
@@ -58,6 +67,17 @@ if (TCB_ENV) {
 let USE_CLOUD = !!tcb;
 let cloudConfirmed = false;
 
+// 凭证是否齐全（用于判断是否真去探测云，避免无凭证时发起云调用而崩溃）
+const HAS_TCB_API_KEY = !!process.env.TCB_API_KEY;
+const HAS_TCB_SECRET = !!(process.env.TCB_SECRET_ID && process.env.TCB_SECRET_KEY);
+// 若配置了 TCB_ENV 却无任何可用凭证（也无云托管自动注入的临时凭证），
+// 直接降级本地磁盘，避免云调用因 missing secretId/secretKey 而崩溃进程。
+if (USE_CLOUD && !HAS_TCB_API_KEY && !HAS_TCB_SECRET) {
+  console.warn("  ⚠️  已设置 TCB_ENV 但未提供 TCB_API_KEY / TCB_SECRET_ID+TCB_SECRET_KEY，已回退本地磁盘。");
+  USE_CLOUD = false;
+  tcb = null;
+}
+
 // 本地目录（云模式探测失败时也会用到）
 // 自动检测 dist 目录：优先同级 dist/（部署包），其次 ../standalone/dist（开发环境）
 const DIST_DIR = process.env.DIST_DIR ||
@@ -96,10 +116,15 @@ if (USE_CLOUD) {
     } catch (e) {
       lastCloudError = (e && e.message) || String(e);
       lastCloudErrorAt = new Date().toISOString();
-      console.warn("  ⚠️  CloudBase 连接失败（" + lastCloudError + "），已自动降级为本地磁盘，请检查 TCB_ENV / TCB_API_KEY 配置");
+      console.warn("  ⚠️  CloudBase 连接失败（" + lastCloudError + "），已自动降级为本地磁盘，请检查 TCB_ENV / 密钥配置");
       USE_CLOUD = false;
     }
-  })();
+  })().catch((e) => {
+    lastCloudError = (e && e.message) || String(e);
+    lastCloudErrorAt = new Date().toISOString();
+    console.error("  ⚠️  云探测未捕获异常（已忽略，服务以本地磁盘运行）:", lastCloudError);
+    USE_CLOUD = false;
+  });
 } else {
   ensureLocalDirs();
 }
