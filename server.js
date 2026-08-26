@@ -371,6 +371,52 @@ app.get("/api/surveys/:activityId", auth, async (req, res) => {
 });
 
 // ============================================================
+// 数据导出 / 导入（管理员，用于切换存储前的备份与迁移）
+// ============================================================
+app.get("/api/admin/export", auth, requireAdmin, async (req, res) => {
+  try {
+    const activities = await readJSON("activities", []);
+    const users = await readJSON("users", {});
+    const stores = await readJSON("stores", {});
+    const uploads = await readJSON("uploads", {});
+    const files = await readJSON("files", {});
+    const surveys = {};
+    for (const a of activities) {
+      if (a && a.id) surveys[a.id] = await readJSON("surveys_" + a.id, []);
+    }
+    res.json({
+      version: 1,
+      exportedAt: new Date().toISOString(),
+      mode: USE_CLOUD ? "cloud" : "local",
+      data: { activities, users, stores, uploads, files, surveys },
+    });
+  } catch (e) {
+    res.status(500).json({ error: "export failed: " + (e && e.message || e) });
+  }
+});
+
+app.post("/api/admin/import", auth, requireAdmin, async (req, res) => {
+  try {
+    const payload = req.body && req.body.data;
+    if (!payload || typeof payload !== "object") return res.status(400).json({ error: "missing data" });
+    const { activities, users, stores, uploads, files, surveys } = payload;
+    if (activities) await writeJSON("activities", activities);
+    if (users) await writeJSON("users", users);
+    if (stores) await writeJSON("stores", stores);
+    if (uploads) await writeJSON("uploads", uploads);
+    if (files) await writeJSON("files", files);
+    if (surveys && typeof surveys === "object") {
+      for (const [aid, list] of Object.entries(surveys)) {
+        await writeJSON("surveys_" + aid, list);
+      }
+    }
+    res.json({ ok: true });
+  } catch (e) {
+    res.status(500).json({ error: "import failed: " + (e && e.message || e) });
+  }
+});
+
+// ============================================================
 // 微信公众号网页授权域名验证
 // ============================================================
 // 在公众号后台设置「网页授权域名」时，会要求下载 MP_verify_xxx.txt 并放到域名根目录。
