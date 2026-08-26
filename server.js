@@ -247,6 +247,8 @@ app.get("/api/health", (req, res) => {
     mode: (USE_CLOUD && cloudConfirmed) ? "cloud" : "local",
     cloudConfirmed,
     sdkVersion: CLOUDBASE_SDK_VERSION,
+    hasApiKey: HAS_TCB_API_KEY,
+    hasSecret: HAS_TCB_SECRET,
     lastCloudError,
     lastCloudErrorAt,
   });
