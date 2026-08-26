@@ -35,7 +35,11 @@ if (TCB_ENV) {
   try {
     const cloudbase = require("@cloudbase/node-sdk");
     const opts = { env: TCB_ENV };
-    if (process.env.TCB_SECRET_ID && process.env.TCB_SECRET_KEY) {
+    if (process.env.TCB_API_KEY) {
+      // 新版控制台「服务端 API Key」单密钥模式
+      opts.apiKey = process.env.TCB_API_KEY;
+    } else if (process.env.TCB_SECRET_ID && process.env.TCB_SECRET_KEY) {
+      // 旧版 SecretId/SecretKey 模式
       opts.secretId = process.env.TCB_SECRET_ID;
       opts.secretKey = process.env.TCB_SECRET_KEY;
     }
