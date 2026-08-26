@@ -195,6 +195,26 @@ async function pgGetFile(key) {
   return { content: Buffer.from(b64, "base64"), content_type: contentType };
 }
 
+// 图片存 PG 自检（仅 PG 模式）：真实写一张探针图再读回，确认建表+读写链路通
+let imageStoreReady = false;
+let lastImageStoreError = null;
+async function probeImageStore() {
+  if (!(USE_CLOUD && cloudConfirmed && CLOUD_MODE === "tcb-pg")) return;
+  try {
+    const key = "__probe__/imgtest.png";
+    const px = Buffer.from("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+M9QDwADhgGAWjR9awAAAABJRU5ErkJggg==", "base64");
+    await pgPutFile(key, px, "image/png");
+    const f = await pgGetFile(key);
+    if (!f || !f.content || f.content.length < 10) throw new Error("image store read-back mismatch");
+    await withTimeout(manager.database.executePGSql({ Sql: `DELETE FROM ${PG_FILES_TABLE} WHERE key = '${key}'` }), 10000, "pg-del-probe").catch(() => {});
+    imageStoreReady = true;
+    console.log("  ✅ 图片存储（PostgreSQL）自检通过");
+  } catch (e) {
+    lastImageStoreError = (e && e.message) || String(e);
+    console.warn("  ⚠️  图片存储自检失败（" + lastImageStoreError + "），图片将走本地磁盘");
+  }
+}
+
 // 运行时探测：按顺序尝试文档型数据库 → PostgreSQL。失败则自动降级本地磁盘。
 let lastCloudError = null;
 let lastCloudErrorAt = null;
@@ -263,6 +283,7 @@ if (USE_CLOUD) {
           CLOUD_MODE = "tcb-pg";
           console.log("  ✅ CloudBase PostgreSQL 持久化已确认可用");
           await probeStorage();
+          await probeImageStore();
           return;
         }
         throw new Error("pg probe read mismatch");
@@ -431,6 +452,9 @@ app.get("/api/health", (req, res) => {
     storageConfirmed,
     storageError: lastStorageError,
     storageErrorAt: lastStorageErrorAt,
+    imageStore: (USE_CLOUD && cloudConfirmed) ? (CLOUD_MODE === "tcb-pg" ? "postgres" : (storageConfirmed ? "cloud-storage" : "local")) : "local",
+    imageStoreReady,
+    imageStoreError: lastImageStoreError,
     sdkVersion: CLOUDBASE_SDK_VERSION,
     managerVersion: MANAGER_SDK_VERSION,
     hasApiKey: HAS_TCB_API_KEY,
