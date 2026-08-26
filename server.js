@@ -441,7 +441,30 @@ function maskVal(v) {
   if (v.length <= 8) return v;
   return v.slice(0, 4) + "…" + v.slice(-4);
 }
-app.get("/api/health", (req, res) => {
+// 数据计数诊断（仅 PG 模式）：读取关键 key 的行内容，用于验证云持久化是否真的存进了数据（重启后仍在）
+async function pgDataCounts() {
+  if (!(USE_CLOUD && cloudConfirmed && CLOUD_MODE === "tcb-pg" && manager && manager.database && manager.database.executePGSql)) return null;
+  try {
+    const keys = ["activities", "stores", "users", "surveys", "uploads", "files", "global"];
+    const sql = `SELECT key, value FROM ${PG_TABLE} WHERE key IN (${keys.map(k => `'${k.replace(/'/g, "''")}'`).join(",")})`;
+    const res = await withTimeout(manager.database.executePGSql({ Sql: sql }), 15000, "pg-counts");
+    const counts = {};
+    (res.Rows || []).forEach(r => {
+      const row = JSON.parse(r);
+      const k = row[0];
+      let v = row[1];
+      try { v = (typeof v === "string") ? JSON.parse(v) : v; } catch (e) {}
+      counts[k] = Array.isArray(v) ? v.length : (v === undefined || v === null ? 0 : 1);
+    });
+    return counts;
+  } catch (e) {
+    return { error: e.message };
+  }
+}
+
+app.get("/api/health", async (req, res) => {
+  let dataCounts = null;
+  try { dataCounts = await pgDataCounts(); } catch (e) { dataCounts = { error: e.message }; }
   res.json({
     ok: true,
     tcbEnv: !!TCB_ENV,
@@ -461,6 +484,7 @@ app.get("/api/health", (req, res) => {
     hasSecret: HAS_TCB_SECRET,
     lastCloudError,
     lastCloudErrorAt,
+    dataCounts,
   });
 });
 
