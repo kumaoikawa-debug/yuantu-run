@@ -160,6 +160,31 @@ async function pgWrite(key, value) {
 // 运行时探测：按顺序尝试文档型数据库 → PostgreSQL。失败则自动降级本地磁盘。
 let lastCloudError = null;
 let lastCloudErrorAt = null;
+
+// 云存储可用性探测（仅云持久化已确认时执行）。失败则图片走本地磁盘，不影响主服务。
+let storageConfirmed = false;
+let lastStorageError = null;
+let lastStorageErrorAt = null;
+async function probeStorage() {
+  if (!tcb) return;
+  try {
+    const cloudPath = "__probe__/stest.txt";
+    const buf = Buffer.from("probe");
+    const ret = await withTimeout(tcb.storage().uploadFile({ cloudPath, fileContent: buf }), 12000, "storage-upload");
+    const fileID = ret && ret.fileID;
+    if (!fileID) throw new Error("storage upload 返回的 fileID 为空");
+    const dl = await withTimeout(tcb.storage().downloadFile({ fileID }), 12000, "storage-download");
+    if (!dl || !dl.fileContent) throw new Error("storage download 返回为空");
+    await withTimeout(tcb.storage().deleteFile({ fileList: [fileID] }), 12000, "storage-delete").catch(() => {});
+    storageConfirmed = true;
+    console.log("  ✅ CloudBase 云存储已确认可用（图片将持久化到云）");
+  } catch (e) {
+    lastStorageError = (e && e.message) || String(e);
+    lastStorageErrorAt = new Date().toISOString();
+    console.warn("  ⚠️  CloudBase 云存储探测失败（" + lastStorageError + "），图片将走本地磁盘");
+  }
+}
+
 if (USE_CLOUD) {
   ensureLocalDirs(); // 先建好本地目录，降级时立刻可用
   (async () => {
@@ -172,6 +197,7 @@ if (USE_CLOUD) {
         cloudConfirmed = true;
         CLOUD_MODE = "tcb-db";
         console.log("  ✅ CloudBase 文档型数据库持久化已确认可用");
+        await probeStorage();
         return;
       } catch (e) {
         const msg = ((e && e.message) || String(e)).toLowerCase();
@@ -197,6 +223,7 @@ if (USE_CLOUD) {
           cloudConfirmed = true;
           CLOUD_MODE = "tcb-pg";
           console.log("  ✅ CloudBase PostgreSQL 持久化已确认可用");
+          await probeStorage();
           return;
         }
         throw new Error("pg probe read mismatch");
@@ -305,7 +332,7 @@ app.use((req, res, next) => {
 app.use("/uploads", express.static(UPLOADS_DIR));
 if (TCB_ENV) {
   app.get("/uploads/*", (req, res, next) => {
-    if (!(USE_CLOUD && cloudConfirmed)) return next(); // 云未确认可用，回退本地静态
+    if (!(USE_CLOUD && cloudConfirmed && storageConfirmed)) return next(); // 云存储未确认可用，回退本地静态
     serveCloudFile(req.params[0], res);
   });
 }
@@ -346,6 +373,9 @@ app.get("/api/health", (req, res) => {
     mode: (USE_CLOUD && cloudConfirmed) ? "cloud" : "local",
     cloudMode: CLOUD_MODE,
     cloudConfirmed,
+    storageConfirmed,
+    storageError: lastStorageError,
+    storageErrorAt: lastStorageErrorAt,
     sdkVersion: CLOUDBASE_SDK_VERSION,
     managerVersion: MANAGER_SDK_VERSION,
     hasApiKey: HAS_TCB_API_KEY,
@@ -518,8 +548,8 @@ app.post("/api/upload", auth, async (req, res) => {
   const filename = `${activityId || "misc"}/${kind || "img"}/${Date.now()}-${Math.random().toString(36).slice(2, 8)}.${ext}`;
   const data = base64.replace(/^data:[^;]+;base64,/, "");
 
-  // 云存储模式（仅在云已确认可用时；失败则降级本地盘）
-  if (USE_CLOUD && cloudConfirmed) {
+  // 云存储模式（仅在云已确认且云存储探测可用时；否则降级本地盘）
+  if (USE_CLOUD && cloudConfirmed && storageConfirmed) {
     try {
       const cloudPath = "uploads/" + filename;
       const ret = await withTimeout(tcb.storage().uploadFile({ cloudPath, fileContent: Buffer.from(data, "base64") }));
