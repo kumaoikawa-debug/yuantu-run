@@ -38,6 +38,10 @@
     .thanks p{font-size:13px;color:var(--c-muted)}
     .empty{padding:60px 22px;text-align:center;color:var(--c-muted);font-size:14px;line-height:1.8}
     .foot{text-align:center;font-size:11px;color:var(--c-muted);padding:14px}
+    .foot .filings{margin-top:6px;display:flex;flex-wrap:wrap;gap:6px;align-items:center;justify-content:center}
+    .foot .filings a{color:inherit;text-decoration:none;border-bottom:1px solid transparent}
+    .foot .filings a:hover{border-bottom-color:currentColor}
+    .foot .filings i{opacity:.5;font-style:normal}
   </style>
 </head>
 <body>
@@ -51,6 +55,22 @@
       function read(key, fallback) { try { var v = localStorage.getItem(key); return v ? JSON.parse(v) : fallback; } catch (e) { return fallback; } }
       function escapeHtml(s) { return String(s == null ? '' : s).replace(/[&<>"']/g, function (c) { return {'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]; }); }
       var useCloud = !!(window.surveyCloud && window.surveyCloud.enabled());
+
+      // ===== 网站备案信息（与 app/admin/page.tsx 中的 SITE_FILINGS 保持一致）=====
+      var SITE_FILINGS = {
+        icp: '蜀ICP备2023037283号-2',         // 工信部 ICP 备案号
+        icpUrl: 'https://beian.miit.gov.cn/',
+        police: '',                            // 例如：川公网安备51010000000000号（可选）
+        policeUrl: 'https://beian.mps.gov.cn/'
+      };
+      function filingsHtml() {
+        if (!SITE_FILINGS.icp && !SITE_FILINGS.police) return '';
+        var t = [];
+        if (SITE_FILINGS.icp) t.push('<a href="' + SITE_FILINGS.icpUrl + '" target="_blank" rel="noopener noreferrer nofollow">' + escapeHtml(SITE_FILINGS.icp) + '</a>');
+        if (SITE_FILINGS.icp && SITE_FILINGS.police) t.push('<i>·</i>');
+        if (SITE_FILINGS.police) t.push('<a href="' + SITE_FILINGS.policeUrl + '" target="_blank" rel="noopener noreferrer nofollow">' + escapeHtml(SITE_FILINGS.police) + '</a>');
+        return '<div class="filings">' + t.join('') + '</div>';
+      }
 
       function boot(activity, survey) {
         if (!activity) { app.innerHTML = '<div class="empty">未找到对应的活动问卷。<br/>请确认链接是否正确，或联系活动组织者重新发送。</div>'; return; }
@@ -75,7 +95,7 @@
         });
         html += '</div>';
         html += '<div class="submit"><button id="submitBtn">提交问卷</button></div>';
-        html += '<div class="foot">远拓运营中心 · 问卷数据仅用于本次活动复盘</div>';
+        html += '<div class="foot">远拓运营中心 · 问卷数据仅用于本次活动复盘' + filingsHtml() + '</div>';
         app.innerHTML = html;
 
         app.querySelectorAll('.stars button').forEach(function (btn) {
