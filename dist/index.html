@@ -10,5 +10,23 @@
   </head>
   <body>
     <div id="root"></div>
+    <script>
+      /* 注册冷启动自愈 Service Worker：见 public/sw.js。
+         作用：云托管缩容到 0 后，首个请求会撞上网关 503；
+         本 SW 会自动延迟重试，把「打不开」变成「慢几秒」。
+         不缓存任何资源，因此不会造成版本陈旧。
+         注册失败不影响后台使用（静默忽略）。 */
+      (function () {
+        if (!("serviceWorker" in navigator)) return;
+        var okProto =
+          location.protocol === "https:" || location.hostname === "localhost";
+        if (!okProto) return;
+        window.addEventListener("load", function () {
+          navigator.serviceWorker
+            .register("/sw.js", { scope: "/" })
+            .catch(function () {});
+        });
+      })();
+    </script>
   </body>
 </html>
