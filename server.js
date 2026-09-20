@@ -37,6 +37,8 @@ const PORT = process.env.PORT || 3000;
 const APPID = process.env.APPID || "";
 const APPSECRET = process.env.APPSECRET || "";
 const ADMIN_OPENID = process.env.ADMIN_OPENID || "";
+// 浏览器/电脑端管理员密码登录：不依赖微信。未设置时密码通道自动关闭（403）。
+const ADMIN_PASSWORD = process.env.ADMIN_PASSWORD || "";
 
 // ---- 环境变量与凭证 ----
 const TCB_ENV = process.env.TCB_ENV || process.env.ENV_ID || process.env.CLOUDBASE_ENV;
@@ -507,9 +509,28 @@ app.get("/api/health", async (req, res) => {
 });
 
 
-// ---- 微信登录：code 换 openid + token ----
+// ---- 登录方式配置（前端据此决定显示哪种登录入口，无需鉴权） ----
+app.get("/api/auth/config", (req, res) => {
+  res.json({
+    wechatLogin: !!(APPID && APPSECRET),
+    passwordLogin: !!ADMIN_PASSWORD,
+  });
+});
+
+// ---- 微信登录 / 浏览器密码登录：code 换 openid + token，或 password 直接签发 admin token ----
 app.post("/api/auth/login", async (req, res) => {
-  const { code } = req.body;
+  const { code, password } = req.body || {};
+
+  // 浏览器/电脑端管理员密码登录（不依赖微信）
+  if (password !== undefined) {
+    if (!ADMIN_PASSWORD) return res.status(403).json({ error: "password login disabled" });
+    if (password !== ADMIN_PASSWORD) return res.status(401).json({ error: "invalid password" });
+    if (!ADMIN_OPENID) return res.status(500).json({ error: "ADMIN_OPENID not configured" });
+    const token = crypto.randomBytes(32).toString("hex");
+    sessions.set(token, { openid: ADMIN_OPENID, name: "管理员" });
+    return res.json({ openid: ADMIN_OPENID, token, name: "管理员", avatar: null, role: "admin", status: "active" });
+  }
+
   if (!code) return res.status(400).json({ error: "missing code" });
   if (!APPID || !APPSECRET) return res.status(500).json({ error: "server not configured" });
 
